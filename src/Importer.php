@@ -5,22 +5,23 @@
 namespace LeGAG\Importer;
 
 use Exception;
+use Google_Client;
+use Google_Service_Sheets;
+use LeGAG\Importer\adapters\AdapterInterface;
 use PDO;
 use Psr\Log\LoggerInterface;
 use RuntimeException;
 
 class Importer
 {
-    protected $dbUser;
-    protected $dbPass;
-    protected $dbName;
-    protected $dbHost;
-
     /** @var PDO */
     protected $connection;
 
     /** @var LoggerInterface A PSR3-compatible logger */
     protected $logger;
+
+    /** @var AdapterInterface */
+    protected $adapter;
 
     /** @var ListTable */
     protected $producers;
@@ -34,37 +35,44 @@ class Importer
     /** @var ListTable */
     protected $products;
 
-    public function __construct(LoggerInterface $logger, $dbName = 'db', $dbHost = 'db', $dbUser = 'db', $dbPass = 'db')
+    public function __construct(LoggerInterface $logger, PDO $connection, AdapterInterface $adapter)
     {
         $this->logger = $logger;
-        $this->dbHost = $dbHost;
-        $this->dbUser = $dbUser;
-        $this->dbPass = $dbPass;
-        $this->dbName = $dbName;
-
-        $this->initConnection();
+        $this->connection = $connection;
+        $this->adapter = $adapter;
     }
 
-    public function importFrom($file)
+    public function import()
     {
-        $fh = fopen($file, 'rb');
-
         $this->producers = new ListTable($this->connection, 'producteurs', ['raison_sociale'], $this->logger);
         $this->packagings = new ListTable($this->connection, 'conditionnements', ['nom'], $this->logger);
         $this->measuringUnits = new ListTable($this->connection, 'unites', ['nom'], $this->logger);
         $this->products = new ListTable($this->connection, 'produits', ['producteur', 'nom'], $this->logger);
 
-        // Discard the header row
-        fgetcsv($fh);
-
         $productVariantRecords = [];
-        while ($record = fgetcsv($fh, 0, ';')) {
-            list($productName, $isOrganic, $price, $packaging, $capacity, $capacityUnit, $measuringUnit, $basePrice, $basePriceUnit, , $producer, $category, $animal, $description, $producerLocation) = $record;
+        while ($record = $this->adapter->next()) {
+            [
+                $productName,
+                $isOrganic,
+                $price,
+                $packaging,
+                $capacity,
+                $capacityUnit,
+                $measuringUnit,
+                $basePrice,
+                $basePriceUnit,
+                $unitWeight,
+                $producer,
+                $category,
+                $description,
+                $producerLocation
+            ] = $record + array_fill(0, 14, '');
 
             $productVariantRecords[] = [
                 'produit'         => $this->products->getId([
-                    'producteur' => $this->producers->getId(['raison_sociale' => $producer]),
-                    'nom'        => $productName,
+                    'producteur'  => $this->producers->getId(['raison_sociale' => $producer]),
+                    'nom'         => $productName,
+                    'description' => $description,
                 ]),
                 'prix'            => (float)$price,
                 'conditionnement' => $this->packagings->getId(['nom' => $packaging]),
@@ -90,21 +98,6 @@ class Importer
 
         $this->logger->info('✅ Import complete');
         $this->connection->commit();
-    }
-
-    /**
-     * Create the connection to the database
-     */
-    protected function initConnection()
-    {
-        try {
-            $this->connection = new PDO("mysql:host={$this->dbHost};dbname={$this->dbName}", $this->dbUser, $this->dbPass);
-            $this->connection->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-            $this->connection->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_OBJ);
-        } catch (Exception $e) {
-            var_dump($e);
-            exit;
-        }
     }
 
     protected function debugReport()
